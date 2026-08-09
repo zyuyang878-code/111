@@ -555,33 +555,56 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# --- Summary strip ---
+# --- Summary strip: 3 dimension cards ---
+# Card 1: Nearest (min walking time from user's location)
+nearest = min(halls, key=lambda r: r["walk"])
+# Card 2: Top Pick / Popular (highest peak-share = most popular hall)
+top_pick = max(halls, key=lambda r: r["share"])
+# Card 3: No Wait (shortest estimated wait time)
+no_wait = fastest  # fastest == min wait
+
+# Variables still needed by the Nudge banner below
 fastest_name = fastest["cn"]
 slowest_name = slowest["cn"]
 fastest_wait = fastest["wait"]
 slowest_wait = slowest["wait"]
-fastest_walk = walking_minutes(user_zone, fastest["zone"])
-slowest_walk = walking_minutes(user_zone, slowest["zone"])
+fastest_walk = fastest["walk"]
+slowest_walk = slowest["walk"]
+
+
+def _popularity_rating(share):
+    """Map peak-share to a 5-star popularity rating (higher share = hotter)."""
+    return round(min(3.6 + share * 8.0, 5.0), 1)
+
+
+def _stars(rating):
+    full = int(rating)
+    return "\u2605" * full + "\u2606" * (5 - full)
+
+
+_tp_rating = _popularity_rating(top_pick["share"])
 
 st.markdown(f"""
 <div class="summary-strip">
     <div class="summary-card">
-        <div class="label">推荐 / Recommended</div>
-        <div class="value" style="color:#16A085;">{fastest_name}</div>
+        <div class="label">\U0001F6B6 距离最近 / Nearest</div>
+        <div class="value" style="color:#1976D2;">{nearest['icon']} {nearest['cn']}</div>
         <div style="font-size:0.72rem;color:#666;margin-top:2px;">
-            \u2705 ~{fastest_wait:.1f} min wait &nbsp;\u2022&nbsp; \U0001F6B6 {fastest_walk} min walk
+            \U0001F6B6 {nearest['walk']} min walk &nbsp;\u2022&nbsp; \u23F1\uFE0F ~{nearest['wait']:.1f} min wait
         </div>
     </div>
     <div class="summary-card">
-        <div class="label">平均等待 / Avg Wait</div>
-        <div class="value">{metrics["avg_wait"]:.1f} min</div>
-        <div style="font-size:0.72rem;color:#666;margin-top:2px;">all 13 halls</div>
+        <div class="label">\U0001F525 热门推荐 / Top Pick</div>
+        <div class="value" style="color:#7B1FA2;">{top_pick['icon']} {top_pick['cn']}</div>
+        <div style="font-size:0.72rem;color:#666;margin-top:2px;">
+            {_stars(_tp_rating)} {_tp_rating:.1f} &nbsp;\u2022&nbsp; \u23F1\uFE0F ~{top_pick['wait']:.1f} min wait
+        </div>
     </div>
     <div class="summary-card">
-        <div class="label">\u26a0\ufe0f 警惕 / Avoid</div>
-        <div class="value" style="color:#E74C3C;">{slowest_name}</div>
+        <div class="label">\u26A1 无需等待 / No Wait</div>
+        <div class="value" style="color:#16A085;">{no_wait['icon']} {no_wait['cn']}</div>
         <div style="font-size:0.72rem;color:#666;margin-top:2px;">
-            \u26a0 ~{slowest_wait:.1f} min wait &nbsp;\u2022&nbsp; \U0001F6B6 {slowest_walk} min walk
+            \u23F1\uFE0F ~{no_wait['wait']:.1f} min wait &nbsp;\u2022&nbsp; \U0001F6B6 {no_wait['walk']} min walk
         </div>
     </div>
 </div>
