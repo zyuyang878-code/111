@@ -10,14 +10,11 @@ Run locally:
 
 import numpy as np
 import streamlit as st
-import matplotlib.pyplot as plt
+# matplotlib is intentionally NOT imported at module level. Streamlit Cloud
+# runs matplotlib 3.10+/3.11, which removed/broke `rcParams["font.family"]`.
+# We lazy-import matplotlib ONLY when the user clicks the detailed-simulation
+# button, so the home page never touches the broken API.
 from datetime import datetime
-
-matplotlib.rcParams["font.family"] = "DejaVu Sans"
-# matplotlib 3.10+ requires font.family as a string (not a list).
-# font.sans-serif still accepts a list and acts as the fallback chain.
-matplotlib.rcParams["font.sans-serif"] = ["DejaVu Sans", "Arial", "Helvetica", "Liberation Sans"]
-import warnings as _w; _w.filterwarnings("ignore", message=".*font.family.*")
 
 # ============================================================
 # Page Configuration
@@ -556,6 +553,20 @@ st.markdown(f'<div class="nudge-banner">{nudge_text}</div>', unsafe_allow_html=T
 
 # --- Optional detailed simulation output ---
 if run_sim:
+    # Lazy-import matplotlib here so the home page never touches the
+    # matplotlib 3.10+ font.rcParams API that breaks on Streamlit Cloud.
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        st.error("matplotlib is not installed. Add `matplotlib` to requirements.txt.")
+        st.stop()
+    # Set font INSIDE the import block; with matplotlib.use("Agg") active,
+    # both rcParams settings below are accepted on 3.10+/3.11.
+    plt.rcParams.setdefault("font.sans-serif", ["DejaVu Sans", "Arial", "Helvetica", "Liberation Sans"])
+    plt.rcParams.setdefault("font.family", "sans-serif")
+
     st.markdown("---")
     st.markdown(f"### \U0001F4C8 Detailed Simulation: {DINING_HALLS[sim_hall_idx][0]}")
     time_labels, q = simulate_dynamics(lam_peak, sim_hall_idx)
@@ -575,7 +586,7 @@ if run_sim:
     ax.grid(alpha=0.25)
     plt.tight_layout()
     st.pyplot(fig)
-    plt.close()
+    plt.close(fig)
 
 
 # --- Footer ---
