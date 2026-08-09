@@ -13,7 +13,11 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-matplotlib.rcParams["font.family"] = ["DejaVu Sans", "Arial", "Helvetica"]
+matplotlib.rcParams["font.family"] = "DejaVu Sans"
+# matplotlib 3.10+ requires font.family as a string (not a list).
+# font.sans-serif still accepts a list and acts as the fallback chain.
+matplotlib.rcParams["font.sans-serif"] = ["DejaVu Sans", "Arial", "Helvetica", "Liberation Sans"]
+import warnings as _w; _w.filterwarnings("ignore", message=".*font.family.*")
 
 # ============================================================
 # Page Configuration
