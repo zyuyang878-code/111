@@ -9,7 +9,7 @@ Features:
   - Student Hub sidebar with "我的位置" picker + walking-time estimates.
   - Real-time M/G/1 wait estimates via Pollaczek-Khinchine formula.
   - Smart Nudge banner recommending the fastest hall.
-  - Halls ordered by popularity Tier (internal), displayed flat (no headers).
+  - Halls ordered by walking distance from the user's selected location (nearest first).
 
 Run locally:
     streamlit run hku_canteen_app.py
@@ -192,26 +192,25 @@ def classify(wait_min):
 
 
 @st.cache_data(show_spinner=False)
-def compute_all_metrics(lam_peak, shuffle_seed=42):
-    """Compute per-hall wait times. Return halls in Tier order
-    (Tier 1 → 2 → 3 internally), randomized within tier.
+def compute_all_metrics(lam_peak, user_zone="main"):
+    """Compute per-hall wait times. Return halls ordered by walking distance
+    from the user's selected location (nearest first).
     Fastest/slowest by wait time for the Nudge banner.
     Nudge is always ON (student-facing — no toggle).
     """
-    rng = np.random.default_rng(shuffle_seed)
-
     results = []
     for i, (cn, en, mean_s, share, icon, zone) in enumerate(DINING_HALLS):
         lam_i = lam_peak * share
         wait = mg1_mean_wait(lam_i, mean_s, SERVICE_STD)
         q_len = estimate_queue_length(lam_i, mean_s)
         rho = lam_i * mean_s
+        walk = walking_minutes(user_zone, zone)
         results.append({
             "idx": i, "cn": cn, "en": en, "mean_s": mean_s,
             "share": share, "icon": icon, "zone": zone, "lam": lam_i,
             "wait": wait, "q_len": q_len, "rho": rho,
             "status": classify(wait),
-            "tier": hall_tier(cn),
+            "walk": walk,
         })
 
     sorted_by_wait = sorted(results, key=lambda r: r["wait"])
@@ -219,12 +218,8 @@ def compute_all_metrics(lam_peak, shuffle_seed=42):
     slowest = sorted_by_wait[-1]
     avg_wait = float(np.mean([r["wait"] for r in results]))
 
-    # Order by Tier 1 → 2 → 3, shuffle within tier (internal only)
-    ordered = []
-    for tier in [1, 2, 3]:
-        tier_halls = [r for r in results if r["tier"] == tier]
-        rng.shuffle(tier_halls)
-        ordered.extend(tier_halls)
+    # Order by walking distance from user's location (nearest → farthest)
+    ordered = sorted(results, key=lambda r: r["walk"])
 
     return {
         "halls": ordered,
@@ -496,11 +491,6 @@ st.markdown("""
 period_key, period_cn, period_en, lam_peak = get_time_period()
 nudge = True  # Always ON for student-facing app
 
-# Stable shuffle seed per session (no user-facing control)
-if "shuffle_seed" not in st.session_state:
-    st.session_state["shuffle_seed"] = 42
-shuffle_seed = st.session_state["shuffle_seed"]
-
 
 # ============================================================
 # Sidebar — Student Hub (simplified: location only)
@@ -544,7 +534,7 @@ $$E[W] = \\frac{\\lambda_i \\cdot E[S^2]}{2(1-\\rho_i)}, \\quad \\rho_i = \\lamb
 # ============================================================
 # Main Page
 # ============================================================
-metrics = compute_all_metrics(lam_peak, shuffle_seed=shuffle_seed)
+metrics = compute_all_metrics(lam_peak, user_zone=user_zone)
 halls = metrics["halls"]
 fastest = metrics["fastest"]
 slowest = metrics["slowest"]
@@ -611,7 +601,7 @@ def render_card(hall, is_recommended=False, user_zone_val=None):
     q = hall["q_len"]
     w = hall["wait"]
     rho_pct = min(hall["rho"] * 100, 100)
-    walk = walking_minutes(user_zone_val, hall["zone"]) if user_zone_val else None
+    walk = hall.get("walk") or (walking_minutes(user_zone_val, hall["zone"]) if user_zone_val else None)
 
     reco_html = ('<span class="reco-badge">\u2605 Recommended (Fastest)</span>'
                  if is_recommended else
