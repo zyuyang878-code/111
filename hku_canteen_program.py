@@ -5,10 +5,11 @@ Multi-window dining hall queue simulator with real-time behavioural
 nudge. Renders 13 real HKU dining halls as mobile-style cards.
 
 Features:
-  - Halls ordered by popularity Tier (1=最火爆 → 3=较少人), shuffled within tier.
+  - Time-aware: arrival rate auto-adjusts by lunch/dinner peak hours.
   - Student Hub sidebar with "我的位置" picker + walking-time estimates.
   - Real-time M/G/1 wait estimates via Pollaczek-Khinchine formula.
   - Smart Nudge banner recommending the fastest hall.
+  - Halls ordered by popularity Tier (internal), displayed flat (no headers).
 
 Run locally:
     streamlit run hku_canteen_app.py
@@ -20,8 +21,8 @@ from datetime import datetime
 
 # matplotlib is intentionally NOT imported at module level. Streamlit Cloud
 # runs matplotlib 3.10+/3.11, which removed/broke `rcParams["font.family"]`.
-# We lazy-import matplotlib ONLY when the user clicks the detailed-simulation
-# button, so the home page never touches the broken API.
+# We lazy-import matplotlib ONLY if ever needed, so the home page never
+# touches the broken APIs.
 
 
 # ============================================================
@@ -44,7 +45,7 @@ DINING_HALLS = [
     ("星巴克",           "Starbucks",                 1.5, 0.03, "\u2615",     "centenary"),
 ]
 
-# Popularity tiers (small周 spec):
+# Popularity tiers (internal ordering only — NOT shown to front-end users):
 #   Tier 1 = 最火爆,  Tier 2 = 受欢迎,  Tier 3 = 较少人
 TIERS = {
     1: ["庄月明食堂", "方树泉食堂"],
@@ -54,12 +55,6 @@ TIERS = {
         "U Deli", "Sandwich Club", "Coffee Academics",
         "亚洲滋味餐厅", "Subway",
     ],
-}
-
-TIER_LABELS = {
-    1: "\U0001F525 Tier 1 — 最火爆",
-    2: "\U0001F4C8 Tier 2 — 受欢迎",
-    3: "\u2705 Tier 3 — 较少人",
 }
 
 # HKU location picker — (Chinese, English, campus_zone)
@@ -89,7 +84,7 @@ WALKING_MIN = {
     ("medical",   "medical"):    3,
     ("medical",   "mtr"):       10,
     ("mtr",       "centenary"):  5,
-    ("mtr",       "main"):       8,
+    ("mtr",       "main"):        8,
     ("mtr",       "medical"):   10,
     ("mtr",       "mtr"):        1,
 }
@@ -129,6 +124,46 @@ def hall_tier(cn_name):
 
 
 # ============================================================
+# Time-based dynamic arrival rate (backend logic)
+# ============================================================
+# Peak windows and multipliers — students never see these numbers; the
+# system auto-selects based on the real clock time.
+LUNCH_PEAK_START = 11 * 60 + 30   # 11:30
+LUNCH_PEAK_END   = 14 * 60        # 14:00
+DINNER_PEAK_START = 17 * 60 + 30  # 17:30
+DINNER_PEAK_END   = 19 * 60       # 19:00
+
+# Base arrival rates (students/min) per period
+LAMBDA_LUNCH_PEAK  = 1.3   # heaviest — noon rush
+LAMBDA_DINNER_PEAK = 1.0   # busy but lighter than lunch
+LAMBDA_OFF_PEAK    = 0.35  # calm between meals
+LAMBDA_CLOSED      = 0.1   # very quiet (early morning / late evening)
+
+# Operating hours (food outlets roughly open 8:00 - 20:00)
+OPEN_HOUR  = 8
+CLOSE_HOUR = 20
+
+
+def get_time_period():
+    """Return (period_key, label_cn, label_en, lambda) based on current time."""
+    now = datetime.now()
+    minutes = now.hour * 60 + now.minute
+
+    if minutes < OPEN_HOUR * 60 or minutes >= CLOSE_HOUR * 60:
+        return ("closed",  "非营业时段", "Closed",
+                LAMBDA_CLOSED)
+    elif LUNCH_PEAK_START <= minutes < LUNCH_PEAK_END:
+        return ("lunch",   "午餐高峰",   "Lunch Peak",
+                LAMBDA_LUNCH_PEAK)
+    elif DINNER_PEAK_START <= minutes < DINNER_PEAK_END:
+        return ("dinner",  "晚餐高峰",   "Dinner Peak",
+                LAMBDA_DINNER_PEAK)
+    else:
+        return ("offpeak", "非高峰时段", "Off-Peak",
+                LAMBDA_OFF_PEAK)
+
+
+# ============================================================
 # Core Simulation Engine
 # ============================================================
 def mg1_mean_wait(lam, mean_s, std_s):
@@ -156,68 +191,12 @@ def classify(wait_min):
         return "smooth"
 
 
-def _simulate_mgc(arrivals, services, n_windows=1):
-    n = len(arrivals)
-    if n == 0:
-        return np.array([])
-    window_free = np.zeros(n_windows)
-    waits = np.zeros(n)
-    for i in range(n):
-        w = np.argmin(window_free)
-        start = max(arrivals[i], window_free[w])
-        waits[i] = start - arrivals[i]
-        window_free[w] = start + services[i]
-    return waits
-
-
-def simulate_dynamics(lam_total, hall_idx, seed=42):
-    """Run detailed sim for a single hall. Returns (time_labels, queue_len)."""
-    chinese, english, mean_s, share, _icon, _zone = DINING_HALLS[hall_idx]
-    lam = lam_total * share
-    rng = np.random.default_rng(seed)
-    sigma = np.sqrt(np.log(1 + (SERVICE_STD / mean_s) ** 2))
-    mu = np.log(mean_s) - sigma ** 2 / 2
-    SIM_MIN = 90
-
-    n_arr = rng.poisson(lam * SIM_MIN)
-    if n_arr == 0:
-        return ([f"12:{t:02d}" if t < 60 else f"13:{t-60:02d}" for t in range(SIM_MIN)],
-                np.zeros(SIM_MIN, dtype=int))
-
-    inter = rng.exponential(1.0 / max(lam, 1e-6), n_arr)
-    arr = np.cumsum(inter)
-    arr = arr[arr < SIM_MIN]
-    serv = rng.lognormal(mu, sigma, len(arr))
-
-    events = []
-    window_free = 0.0
-    for i in range(len(arr)):
-        a = arr[i]
-        start = max(a, window_free)
-        end = start + serv[i]
-        events.append((a, 1))
-        events.append((end, -1))
-        window_free = end
-    events.sort()
-
-    q = np.zeros(SIM_MIN, dtype=int)
-    cur = 0
-    ei = 0
-    for t in range(SIM_MIN):
-        while ei < len(events) and events[ei][0] <= t:
-            cur += events[ei][1]
-            ei += 1
-        q[t] = max(cur, 0)
-
-    time_labels = [f"12:{t:02d}" if t < 60 else f"13:{t-60:02d}" for t in range(SIM_MIN)]
-    return time_labels, q
-
-
 @st.cache_data(show_spinner=False)
-def compute_all_metrics(lam_peak, nudge, shuffle_seed=42):
+def compute_all_metrics(lam_peak, shuffle_seed=42):
     """Compute per-hall wait times. Return halls in Tier order
-    (Tier 1 → 2 → 3), randomized within tier. Fastest/slowest by
-    wait time for the Nudge banner.
+    (Tier 1 → 2 → 3 internally), randomized within tier.
+    Fastest/slowest by wait time for the Nudge banner.
+    Nudge is always ON (student-facing — no toggle).
     """
     rng = np.random.default_rng(shuffle_seed)
 
@@ -240,6 +219,7 @@ def compute_all_metrics(lam_peak, nudge, shuffle_seed=42):
     slowest = sorted_by_wait[-1]
     avg_wait = float(np.mean([r["wait"] for r in results]))
 
+    # Order by Tier 1 → 2 → 3, shuffle within tier (internal only)
     ordered = []
     for tier in [1, 2, 3]:
         tier_halls = [r for r in results if r["tier"] == tier]
@@ -268,7 +248,6 @@ st.markdown("""
     }
 
     /* ---------- SIDEBAR FIX ---------- */
-    /* Force the sidebar to a clean light theme so all text is readable. */
     section[data-testid="stSidebar"] {
         background: #ffffff !important;
         color: #1a1a1a !important;
@@ -290,7 +269,6 @@ st.markdown("""
     section[data-testid="stSidebar"] h4 {
         color: #003366 !important;
     }
-    /* Sidebar expander: light background, dark text */
     section[data-testid="stSidebar"] details,
     section[data-testid="stSidebar"] .stExpander {
         background: #f8f9fa !important;
@@ -312,7 +290,6 @@ st.markdown("""
         background: #ffffff !important;
         color: #1a1a1a !important;
     }
-    /* Sidebar tables: ensure cells readable */
     section[data-testid="stSidebar"] table {
         color: #1a1a1a !important;
         background: #ffffff !important;
@@ -323,7 +300,6 @@ st.markdown("""
         background: #ffffff !important;
         border-color: #e0e0e0 !important;
     }
-    /* Sidebar buttons */
     section[data-testid="stSidebar"] .stButton > button {
         background: #003366 !important;
         color: #ffffff !important;
@@ -334,7 +310,6 @@ st.markdown("""
         background: #1a4789 !important;
         color: #ffffff !important;
     }
-    /* The "expand sidebar" arrow icon */
     button[kind="header"] {
         color: #003366 !important;
     }
@@ -357,6 +332,15 @@ st.markdown("""
         font-size: 0.85rem;
         opacity: 0.9;
         margin-top: 3px;
+    }
+    .top-bar .period-tag {
+        display: inline-block;
+        background: rgba(255,255,255,0.18);
+        padding: 2px 10px;
+        border-radius: 10px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin-left: 6px;
     }
     .live-dot {
         display: inline-block;
@@ -400,19 +384,6 @@ st.markdown("""
         margin-top: 2px;
     }
 
-    /* ---------- Tier header ---------- */
-    .tier-header {
-        margin: 14px 0 8px 0;
-        padding: 6px 12px;
-        border-radius: 8px;
-        font-size: 1rem;
-        font-weight: 700;
-        color: white;
-    }
-    .tier-1 { background: linear-gradient(135deg, #C62828, #E74C3C); }
-    .tier-2 { background: linear-gradient(135deg, #E65100, #F39C12); }
-    .tier-3 { background: linear-gradient(135deg, #2E7D32, #16A085); }
-
     /* ---------- Hall card ---------- */
     .hall-card {
         border-radius: 14px;
@@ -431,15 +402,6 @@ st.markdown("""
         font-weight: 700;
         color: #1a1a1a;
         margin-bottom: 2px;
-    }
-    .hall-card .name .tier-tag {
-        font-size: 0.65rem;
-        background: rgba(0,0,0,0.08);
-        padding: 1px 6px;
-        border-radius: 8px;
-        margin-left: 4px;
-        color: #555;
-        font-weight: 600;
     }
     .hall-card .name-en {
         font-size: 0.72rem;
@@ -529,7 +491,19 @@ st.markdown("""
 
 
 # ============================================================
-# Sidebar — Student Hub
+# Backend: auto-determine time-based parameters (hidden from user)
+# ============================================================
+period_key, period_cn, period_en, lam_peak = get_time_period()
+nudge = True  # Always ON for student-facing app
+
+# Stable shuffle seed per session (no user-facing control)
+if "shuffle_seed" not in st.session_state:
+    st.session_state["shuffle_seed"] = 42
+shuffle_seed = st.session_state["shuffle_seed"]
+
+
+# ============================================================
+# Sidebar — Student Hub (simplified: location only)
 # ============================================================
 st.sidebar.markdown("### \U0001F393 学生页面 / Student Hub")
 st.sidebar.markdown("---")
@@ -549,44 +523,7 @@ user_loc_cn = HKU_LOCATIONS[selected_idx][0]
 
 st.sidebar.markdown("---")
 
-# --- Simulation Controls ---
-st.sidebar.markdown("#### \u2699\ufe0f 模拟参数 / Simulation Controls")
-
-lam_peak = st.sidebar.slider(
-    "高峰到达率 \u03bb (students / min)",
-    min_value=0.3, max_value=1.8, value=1.0, step=0.1,
-    help="Total lunch-peak arrival rate across all halls.",
-)
-
-nudge = st.sidebar.checkbox(
-    "开启智能推荐 (Smart Nudge)",
-    value=True,
-    help="Highlight the fastest hall in real time.",
-)
-
-# --- Reshuffle button ---
-if st.sidebar.button("\U0001F500 重新打乱同梯队顺序", use_container_width=True):
-    st.session_state["shuffle_seed"] = int(datetime.now().timestamp() * 1000) % 100000
-
-if "shuffle_seed" not in st.session_state:
-    st.session_state["shuffle_seed"] = 42
-shuffle_seed = st.session_state["shuffle_seed"]
-
-st.sidebar.markdown("---")
-st.sidebar.markdown(f"""
-**实时参数 / Live Parameters**
-
-| 参数 | 值 |
-|---|---|
-| 我的位置 | {user_loc_cn} |
-| \u03bb (总到达率) | {lam_peak:.1f} /min |
-| 食堂数量 | 13 |
-| Smart Nudge | {'ON \u2705' if nudge else 'OFF \u274c'} |
-| 排序种子 | #{shuffle_seed} |
-| 更新时间 | {datetime.now().strftime('%H:%M:%S')} |
-""")
-
-st.sidebar.markdown("---")
+# --- Model Details (educational, kept) ---
 with st.sidebar.expander("\U0001F4DA 模型说明 / Model Details"):
     st.markdown("""
 每个食堂建模为 **M/G/1** 队列。实时等待时间通过 **Pollaczek-Khinchine** 公式计算:
@@ -595,39 +532,35 @@ $$E[W] = \\frac{\\lambda_i \\cdot E[S^2]}{2(1-\\rho_i)}, \\quad \\rho_i = \\lamb
 
 其中 $\\lambda_i = \\lambda \\times$ (食堂高峰份额), $\\mu_i$ 是食堂特定的平均服务时间。
 
-**食堂梯队 / Hall Tiers**:
-- **Tier 1** (最火爆): 庄月明食堂、方树泉食堂
-- **Tier 2** (受欢迎): 一念素食、Alfafa cafe
-- **Tier 3** (较少人): 其余 9 个
+**到达率 $\\lambda$ 根据当前时间自动调整:**
+- **午餐高峰** (11:30 - 14:00): 高到达率
+- **晚餐高峰** (17:30 - 19:00): 中高到达率
+- **非高峰时段**: 低到达率
 
-排序规则: 按 Tier 1 → 2 → 3 顺序排列，同一梯队内**每次刷新随机打乱**。
+> 排队数据每分钟自动刷新，无需手动设置。
 """)
-
-with st.sidebar.expander("\U0001F4CA 详细仿真 / Run Detailed Simulation"):
-    sim_hall_idx = st.selectbox(
-        "选择食堂仿真 / Hall to simulate",
-        options=range(len(DINING_HALLS)),
-        format_func=lambda i: f"{DINING_HALLS[i][0]} ({DINING_HALLS[i][1]})",
-    )
-    run_sim = st.button("\u25B6 运行仿真 / Simulate", use_container_width=True)
 
 
 # ============================================================
 # Main Page
 # ============================================================
-metrics = compute_all_metrics(lam_peak, nudge, shuffle_seed=shuffle_seed)
+metrics = compute_all_metrics(lam_peak, shuffle_seed=shuffle_seed)
 halls = metrics["halls"]
 fastest = metrics["fastest"]
 slowest = metrics["slowest"]
 
-# --- Top bar ---
+# --- Top bar (with time-period tag) ---
+now_str = datetime.now().strftime('%H:%M')
+period_emoji = {"lunch": "\U0001F354", "dinner": "\U0001F37D\uFE0F",
+                "offpeak": "\U0001F44C", "closed": "\U0001F634"}
 st.markdown(f"""
 <div class="top-bar">
     <h1>\U0001F37D\uFE0F HKU Smart Dining</h1>
     <div class="sub">
         <span class="live-dot"></span>
         LIVE &nbsp;\u2022&nbsp; 实时排队状态 &nbsp;\u2022&nbsp;
-        你的位置: {user_loc_cn} &nbsp;\u2022&nbsp; {datetime.now().strftime('%H:%M')}
+        你的位置: {user_loc_cn} &nbsp;\u2022&nbsp; {now_str}
+        <span class="period-tag">{period_emoji.get(period_key, "")} {period_cn} / {period_en}</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -664,18 +597,11 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# --- Section header ---
+# --- Section header (no tier hint text) ---
 st.markdown("### \U0001F4CD 实时食堂状态 / Live Hall Status")
-st.markdown(
-    "<div style='font-size:0.8rem;color:#888;margin-top:-8px;margin-bottom:8px;'>"
-    "按人气梯队排列 (Tier 1 → 2 → 3)，同梯队内随机排序 · "
-    "点击侧边栏「\U0001F500 重新打乱」刷新顺序"
-    "</div>",
-    unsafe_allow_html=True,
-)
 
 
-# --- Render hall cards grouped by Tier ---
+# --- Render hall cards (flat list, no tier headers) ---
 def render_card(hall, is_recommended=False, user_zone_val=None):
     """Render a single hall card as HTML."""
     s = STATUS[hall["status"]]
@@ -685,7 +611,6 @@ def render_card(hall, is_recommended=False, user_zone_val=None):
     q = hall["q_len"]
     w = hall["wait"]
     rho_pct = min(hall["rho"] * 100, 100)
-    tier = hall["tier"]
     walk = walking_minutes(user_zone_val, hall["zone"]) if user_zone_val else None
 
     reco_html = ('<span class="reco-badge">\u2605 Recommended (Fastest)</span>'
@@ -695,13 +620,12 @@ def render_card(hall, is_recommended=False, user_zone_val=None):
     wait_display = f"{w:.1f} min" if w < 900 else "Overloaded"
     q_display = f"~{int(round(q))}" if q < 900 else ">100"
     walk_display = f"\U0001F6B6 {walk} min" if walk is not None else ""
-    tier_tag = f'<span class="tier-tag">T{tier}</span>'
 
     return f"""
     <div class="hall-card {hall['status']}">
         <div class="status-row">
             <div>
-                <div class="name">{icon} {cn} {tier_tag}</div>
+                <div class="name">{icon} {cn}</div>
                 <div class="name-en">{en} &nbsp;\u2022&nbsp; \u03bc = {hall['mean_s']:.1f} min/student
                     &nbsp;\u2022&nbsp; <span class="walk">{walk_display}</span></div>
             </div>
@@ -732,87 +656,34 @@ def flush_row(cards_html):
             st.markdown(html, unsafe_allow_html=True)
 
 
-current_tier = None
+# Flat display: 2-column grid, no tier headers
 buffer = []
-
 for hall in halls:
-    if hall["tier"] != current_tier:
-        # flush previous tier
-        flush_row(buffer)
-        buffer = []
-        current_tier = hall["tier"]
-        st.markdown(
-            f'<div class="tier-header tier-{current_tier}">{TIER_LABELS[current_tier]}</div>',
-            unsafe_allow_html=True,
-        )
-
     is_reco = nudge and hall["idx"] == fastest["idx"]
     buffer.append(render_card(hall, is_recommended=is_reco, user_zone_val=user_zone))
-
-# flush last tier
+    if len(buffer) == 2:
+        flush_row(buffer)
+        buffer = []
+# flush remaining single card
 flush_row(buffer)
 
 
 # --- Nudge banner ---
-if nudge:
-    if fastest_wait < 5:
-        nudge_text = (
-            f"\U0001F4A1 <strong>Smart Nudge:</strong> 所有食堂都很流畅 "
-            f"(最快 {fastest_wait:.1f} min @ {fastest_name}). 无需重新路由。"
-        )
-    else:
-        time_saved = slowest_wait - fastest_wait
-        nudge_text = (
-            f"\U0001F4A1 <strong>Smart Nudge:</strong> 选择 <strong>{fastest_name}</strong> "
-            f"可比 <strong>{slowest_name}</strong> 节省 ~<strong>{time_saved:.0f} 分钟</strong>排队时间 "
-            f"(步行 {fastest_walk} min vs {slowest_walk} min). "
-            f"智能路由优化校园人流 \u2014 跟着推荐走!"
-        )
-else:
+if fastest_wait < 0.5:
     nudge_text = (
-        "\U0001F4A1 <strong>Smart Nudge:</strong> 在侧边栏开启 Smart Nudge "
-        "查看实时路由推荐。"
+        f"\U0001F4A1 <strong>Smart Nudge:</strong> 当前时段所有食堂都很流畅 "
+        f"({period_cn}). 无需重新路由，就近选择即可。"
+    )
+else:
+    time_saved = slowest_wait - fastest_wait
+    nudge_text = (
+        f"\U0001F4A1 <strong>Smart Nudge:</strong> 选择 <strong>{fastest_name}</strong> "
+        f"可比 <strong>{slowest_name}</strong> 节省 ~<strong>{time_saved:.0f} 分钟</strong>排队时间 "
+        f"(步行 {fastest_walk} min vs {slowest_walk} min). "
+        f"智能路由优化校园人流 \u2014 跟着推荐走!"
     )
 
 st.markdown(f'<div class="nudge-banner">{nudge_text}</div>', unsafe_allow_html=True)
-
-
-# --- Optional detailed simulation output ---
-if run_sim:
-    # Lazy-import matplotlib here so the home page never touches the
-    # matplotlib 3.10+ font.rcParams API that breaks on Streamlit Cloud.
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        st.error("matplotlib is not installed. Add `matplotlib` to requirements.txt.")
-        st.stop()
-    plt.rcParams.setdefault("font.sans-serif",
-                            ["DejaVu Sans", "Arial", "Helvetica", "Liberation Sans"])
-    plt.rcParams.setdefault("font.family", "sans-serif")
-
-    st.markdown("---")
-    st.markdown(f"### \U0001F4C8 详细仿真: {DINING_HALLS[sim_hall_idx][0]}")
-    time_labels, q = simulate_dynamics(lam_peak, sim_hall_idx)
-
-    fig, ax = plt.subplots(figsize=(11, 3.5))
-    cn, en, mean_s, share, _icon, _zone = DINING_HALLS[sim_hall_idx]
-    ax.plot(range(len(q)), q, color="#3498DB", linewidth=2)
-    ax.fill_between(range(len(q)), q, alpha=0.15, color="#3498DB")
-    ax.set_title(
-        f"{cn} ({en}) \u2014 \u03bc={mean_s:.1f} min, "
-        f"\u03bb={lam_peak*share:.2f}/min, \u03c1={lam_peak*share*mean_s:.2f}",
-        fontsize=12, fontweight="bold", color="#003366",
-    )
-    ax.set_xlabel("Time (min from 12:00)")
-    ax.set_ylabel("Queue length (students)")
-    ax.set_xticks([0, 30, 60, 89])
-    ax.set_xticklabels(["12:00", "12:30", "13:00", "13:30"])
-    ax.grid(alpha=0.25)
-    plt.tight_layout()
-    st.pyplot(fig)
-    plt.close(fig)
 
 
 # --- Footer ---
@@ -820,7 +691,7 @@ st.markdown("---")
 st.markdown(
     "<div style='text-align:center;color:#999;font-size:0.75rem;'>"
     "HKU Smart Dining &mdash; Decision Analytics Mini-Project &nbsp;\u2022&nbsp; "
-    "M/G/1 Queue Simulation + Behavioural Nudge + Tiered Popularity Ranking"
+    "M/G/1 Queue Simulation + Behavioural Nudge + Time-Aware Arrival Rate"
     "</div>",
     unsafe_allow_html=True,
 )
