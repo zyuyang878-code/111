@@ -1,19 +1,17 @@
 """
 HKU Smart Dining: Live Queue Analytics & Nudge System
 =====================================================
-A Streamlit interactive web application that wraps the M/G/c queue
-simulation engine and demonstrates a real-time behavioural-nudge
-strategy for HKU dining-hall optimisation.
+Multi-window dining hall queue simulator with real-time behavioural
+nudge. Renders 13 real HKU dining halls as mobile-style cards.
 
 Run locally:
     streamlit run app.py
 """
 
 import numpy as np
-import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
-import matplotlib
+from datetime import datetime
 
 matplotlib.rcParams["font.family"] = ["DejaVu Sans", "Arial", "Helvetica"]
 
@@ -28,34 +26,53 @@ st.set_page_config(
 )
 
 # ============================================================
-# Constants & Model Parameters
+# Constants — 13 HKU Dining Halls
 # ============================================================
-SERVICE_MEAN_B = 2.5      # Window B: minutes per student (default)
-SERVICE_STD    = 0.5      # service-time std (lognormal)
-SIM_MINUTES    = 90       # lunch peak: 12:00 - 13:30
+# (Chinese, English, service_mean_min, peak_share_of_lambda)
+# Ordered slowest → fastest. Shares sum to 1.0.
+DINING_HALLS = [
+    ("庄月明食堂",     "Meng Wah Complex",          3.5, 0.22, "\U0001F35C"),
+    ("学生会食堂",     "Student Union Canteen",     3.2, 0.18, "\U0001F371"),
+    ("方树泉食堂",     "Fong Shu Chuen Hall",       2.8, 0.12, "\U0001F961"),
+    ("亚洲滋味餐厅",   "Asian Flavours",            2.6, 0.08, "\U0001F372"),
+    ("一念素食",       "Yi Nian Vegetarian",        2.5, 0.06, "\U0001F957"),
+    ("cafe330",        "Cafe 330",                  2.5, 0.06, "\u2615"),
+    ("Coffee Academics","Coffee Academics",         2.2, 0.05, "\u2615"),
+    ("U Deli",         "U Deli",                    2.0, 0.05, "\U0001F96A"),
+    ("alfafa cafe",    "Alfafa Cafe",               2.0, 0.04, "\U0001F96A"),
+    ("Sandwich Club",  "Sandwich Club",             2.0, 0.04, "\U0001F96A"),
+    ("Super Sandwiches","Super Sandwiches",         1.8, 0.03, "\U0001F96A"),
+    ("Subway",         "Subway",                    2.0, 0.04, "\U0001F956"),
+    ("星巴克",         "Starbucks",                 1.5, 0.03, "\u2615"),
+]
 
-C_RED   = "#E74C3C"
-C_GREEN = "#16A085"
-C_BLUE  = "#3498DB"
-C_AMBER = "#F39C12"
+SERVICE_STD = 0.5
+
+# Status thresholds (minutes)
+TH_CONGESTED = 15.0
+TH_BUSY      = 5.0
+
+STATUS = {
+    "congested": {
+        "bg": "#FFEBEE", "border": "#E74C3C", "accent": "#C62828",
+        "icon": "\U0001F534", "label": "Congested",
+    },
+    "busy": {
+        "bg": "#FFF8E1", "border": "#F39C12", "accent": "#E65100",
+        "icon": "\U0001F7E0", "label": "Busy",
+    },
+    "smooth": {
+        "bg": "#E8F5E9", "border": "#16A085", "accent": "#2E7D32",
+        "icon": "\U0001F7E2", "label": "Smooth Flow",
+    },
+}
 
 
 # ============================================================
-# Core Simulation Engine (extracted from hku_dining_simulation.py)
+# Core Simulation Engine
 # ============================================================
-def _lognormal_params(mean, std):
-    """Convert (mean, std) to lognormal (mu, sigma)."""
-    sigma = np.sqrt(np.log(1 + (std / mean) ** 2))
-    mu    = np.log(mean) - sigma ** 2 / 2
-    return mu, sigma
-
-
 def mg1_mean_wait(lam, mean_s, std_s):
-    """Pollaczek-Khinchine formula: E[W] for an M/G/1 queue.
-
-    E[W] = lam * E[S^2] / (2 * (1 - rho)),  rho = lam * E[S]
-    Returns 999.0 if the system is unstable (rho >= 1).
-    """
+    """Pollaczek-Khinchine: E[W] for M/G/1 queue."""
     rho = lam * mean_s
     if rho >= 1:
         return 999.0
@@ -63,8 +80,23 @@ def mg1_mean_wait(lam, mean_s, std_s):
     return lam * e_s2 / (2 * (1 - rho))
 
 
+def estimate_queue_length(lam, mean_s):
+    """Little's law: L = lambda * W."""
+    if lam * mean_s >= 1:
+        return 999
+    return lam * mg1_mean_wait(lam, mean_s, SERVICE_STD)
+
+
+def classify(wait_min):
+    if wait_min >= TH_CONGESTED:
+        return "congested"
+    elif wait_min >= TH_BUSY:
+        return "busy"
+    else:
+        return "smooth"
+
+
 def _simulate_mgc(arrivals, services, n_windows=1):
-    """Single M/G/c discrete-event run. Returns per-student wait times."""
     n = len(arrivals)
     if n == 0:
         return np.array([])
@@ -78,457 +110,476 @@ def _simulate_mgc(arrivals, services, n_windows=1):
     return waits
 
 
-def _quick_mc(lam, mean_s, std_s, n_sims=300, seed=42):
-    """Quick Monte Carlo: return (mean, p95, all_waits) for an M/G/1 queue."""
+def simulate_dynamics(lam_total, hall_idx, seed=42):
+    """Run detailed sim for a single hall. Returns (time_labels, queue_len)."""
+    chinese, english, mean_s, share, _icon = DINING_HALLS[hall_idx]
+    lam = lam_total * share
     rng = np.random.default_rng(seed)
-    mu, sigma = _lognormal_params(mean_s, std_s)
-    all_waits = []
-    for _ in range(n_sims):
-        n_exp = rng.poisson(lam * SIM_MINUTES)
-        if n_exp == 0:
-            continue
-        inter = rng.exponential(1.0 / lam, n_exp)
-        arr = np.cumsum(inter)
-        arr = arr[arr < SIM_MINUTES]
-        serv = rng.lognormal(mu, sigma, len(arr))
-        w = _simulate_mgc(arr, serv, 1)
-        if len(w) > 0:
-            all_waits.extend(w)
-    if not all_waits:
-        return 0.0, 0.0, np.array([])
-    arr_w = np.array(all_waits)
-    return float(np.mean(arr_w)), float(np.percentile(arr_w, 95)), arr_w
+    mu, sigma = np.log(1 + (SERVICE_STD / mean_s) ** 2) / 2, np.sqrt(np.log(1 + (SERVICE_STD / mean_s) ** 2))
+    mu = np.log(mean_s) - sigma ** 2 / 2
+    SIM_MIN = 90
+
+    n_arr = rng.poisson(lam * SIM_MIN)
+    if n_arr == 0:
+        return [f"12:{t:02d}" if t < 60 else f"13:{t-60:02d}" for t in range(SIM_MIN)], np.zeros(SIM_MIN, dtype=int)
+
+    inter = rng.exponential(1.0 / max(lam, 1e-6), n_arr)
+    arr = np.cumsum(inter)
+    arr = arr[arr < SIM_MIN]
+    serv = rng.lognormal(mu, sigma, len(arr))
+    n = len(arr)
+
+    events = []
+    window_free = 0.0
+    for i in range(n):
+        a = arr[i]
+        start = max(a, window_free)
+        end = start + serv[i]
+        events.append((a, 1))
+        events.append((end, -1))
+        window_free = end
+    events.sort()
+
+    q = np.zeros(SIM_MIN, dtype=int)
+    cur = 0
+    ei = 0
+    for t in range(SIM_MIN):
+        while ei < len(events) and events[ei][0] <= t:
+            cur += events[ei][1]
+            ei += 1
+        q[t] = max(cur, 0)
+
+    time_labels = [f"12:{t:02d}" if t < 60 else f"13:{t-60:02d}" for t in range(SIM_MIN)]
+    return time_labels, q
 
 
 @st.cache_data(show_spinner=False)
-def compute_metrics(lam_peak, mean_a, nudge):
-    """Compute all metrics for both nudge-on and nudge-off scenarios.
-
-    Returns a dict with wait times and P95 for both scenarios.
-    """
-    mean_b = SERVICE_MEAN_B
-
-    # --- Current scenario (depends on nudge toggle) ---
-    split_a_cur = 0.3 if nudge else 0.5
-    lam_a_cur = lam_peak * split_a_cur
-    lam_b_cur = lam_peak * (1 - split_a_cur)
-
-    wait_a_cur = mg1_mean_wait(lam_a_cur, mean_a, SERVICE_STD)
-    wait_b_cur = mg1_mean_wait(lam_b_cur, mean_b, SERVICE_STD)
-
-    # Quick MC for P95 (combined across both windows)
-    _, p95_a_cur, w_a_cur = _quick_mc(lam_a_cur, mean_a, SERVICE_STD)
-    _, p95_b_cur, w_b_cur = _quick_mc(lam_b_cur, mean_b, SERVICE_STD)
-    combined_cur = np.concatenate([w_a_cur, w_b_cur]) if len(w_a_cur) + len(w_b_cur) > 0 else np.array([0])
-    p95_combined_cur = float(np.percentile(combined_cur, 95))
-
-    # --- Baseline scenario (always no nudge, for comparison) ---
-    split_a_base = 0.5
-    lam_a_base = lam_peak * split_a_base
-    lam_b_base = lam_peak * (1 - split_a_base)
-
-    _, p95_a_base, w_a_base = _quick_mc(lam_a_base, mean_a, SERVICE_STD)
-    _, p95_b_base, w_b_base = _quick_mc(lam_b_base, mean_b, SERVICE_STD)
-    combined_base = np.concatenate([w_a_base, w_b_base]) if len(w_a_base) + len(w_b_base) > 0 else np.array([0])
-    p95_combined_base = float(np.percentile(combined_base, 95))
-
-    p95_reduction = (1 - p95_combined_cur / p95_combined_base) * 100 if p95_combined_base > 0 else 0
-
+def compute_all_metrics(lam_peak, nudge):
+    """Compute per-hall wait times & recommend the best hall."""
+    results = []
+    for i, (cn, en, mean_s, share, icon) in enumerate(DINING_HALLS):
+        lam_i = lam_peak * share
+        wait = mg1_mean_wait(lam_i, mean_s, SERVICE_STD)
+        q_len = estimate_queue_length(lam_i, mean_s)
+        rho = lam_i * mean_s
+        results.append({
+            "idx": i, "cn": cn, "en": en, "mean_s": mean_s,
+            "share": share, "icon": icon, "lam": lam_i,
+            "wait": wait, "q_len": q_len, "rho": rho,
+            "status": classify(wait),
+        })
+    results.sort(key=lambda r: r["wait"])
+    fastest_idx = results[0]["idx"]
+    slowest_idx = results[-1]["idx"]
+    avg_wait = np.mean([r["wait"] for r in results])
     return {
-        "wait_a": wait_a_cur,
-        "wait_b": wait_b_cur,
-        "p95_combined": p95_combined_cur,
-        "p95_base": p95_combined_base,
-        "p95_reduction": p95_reduction,
-        "lam_a": lam_a_cur,
-        "lam_b": lam_b_cur,
+        "halls": results,
+        "fastest": fastest_idx,
+        "slowest": slowest_idx,
+        "avg_wait": avg_wait,
     }
 
 
-def simulate_dynamics(lam_total, mean_a, mean_b, nudge, seed=42):
-    """Run a single detailed discrete-event simulation.
-
-    Returns (DataFrame of per-minute queue lengths, waits_a, waits_b, arrivals_a, arrivals_b).
-    """
-    rng = np.random.default_rng(seed)
-
-    split_a = 0.3 if nudge else 0.5
-    lam_a = lam_total * split_a
-    lam_b = lam_total * (1 - split_a)
-
-    # --- Generate arrivals ---
-    def gen_arrivals(lam):
-        n = rng.poisson(lam * SIM_MINUTES)
-        if n == 0:
-            return np.array([])
-        inter = rng.exponential(1.0 / max(lam, 1e-6), n)
-        arr = np.cumsum(inter)
-        return arr[arr < SIM_MINUTES]
-
-    arr_a = gen_arrivals(lam_a)
-    arr_b = gen_arrivals(lam_b)
-
-    # --- Service times ---
-    mu_a, sig_a = _lognormal_params(mean_a, SERVICE_STD)
-    mu_b, sig_b = _lognormal_params(mean_b, SERVICE_STD)
-    serv_a = rng.lognormal(mu_a, sig_a, len(arr_a)) if len(arr_a) > 0 else np.array([])
-    serv_b = rng.lognormal(mu_b, sig_b, len(arr_b)) if len(arr_b) > 0 else np.array([])
-
-    # --- Wait times ---
-    waits_a = _simulate_mgc(arr_a, serv_a, 1)
-    waits_b = _simulate_mgc(arr_b, serv_b, 1)
-
-    # --- Track queue length at each minute ---
-    def track_queue_len(arrivals, services):
-        n = len(arrivals)
-        if n == 0:
-            return np.zeros(SIM_MINUTES, dtype=int)
-        events = []
-        window_free = 0.0
-        for i in range(n):
-            arr = arrivals[i]
-            start = max(arr, window_free)
-            end = start + services[i]
-            events.append((arr, 1))    # arrival
-            events.append((end, -1))   # departure
-            window_free = end
-        events.sort()
-        q_len = np.zeros(SIM_MINUTES, dtype=int)
-        cur_q = 0
-        ei = 0
-        for t in range(SIM_MINUTES):
-            while ei < len(events) and events[ei][0] <= t:
-                cur_q += events[ei][1]
-                ei += 1
-            q_len[t] = max(cur_q, 0)
-        return q_len
-
-    qa = track_queue_len(arr_a, serv_a)
-    qb = track_queue_len(arr_b, serv_b)
-
-    time_labels = []
-    for t in range(SIM_MINUTES):
-        if t < 60:
-            time_labels.append(f"12:{t:02d}")
-        else:
-            time_labels.append(f"13:{t - 60:02d}")
-
-    df = pd.DataFrame({
-        "Time": time_labels,
-        "Window A (Queue Length)": qa,
-        "Window B (Queue Length)": qb,
-    })
-    return df, waits_a, waits_b, arr_a, arr_b
-
-
 # ============================================================
-# Custom CSS
+# Custom CSS — Mobile App Look
 # ============================================================
 st.markdown("""
 <style>
-    /* Main title */
-    .main-title {
-        font-size: 1.8rem;
-        font-weight: 700;
-        color: #003366;
-        margin-bottom: 0.2rem;
+    .stApp {
+        background: linear-gradient(180deg, #f0f2f5 0%, #e8eaf0 100%);
     }
-    .sub-title {
-        font-size: 0.95rem;
-        color: #666;
-        margin-bottom: 1rem;
+    .block-container {
+        max-width: 760px;
+        padding-top: 1.2rem;
     }
 
-    /* Metric cards */
-    div[data-testid="stMetric"] {
-        background: #f8f9fa;
-        border: 1px solid #e0e0e0;
-        border-radius: 10px;
-        padding: 16px 18px;
-        text-align: center;
+    /* Top bar */
+    .top-bar {
+        background: linear-gradient(135deg, #003366, #1a4789);
+        color: white;
+        padding: 16px 20px;
+        border-radius: 14px;
+        margin-bottom: 14px;
+        box-shadow: 0 4px 12px rgba(0,51,102,0.18);
     }
-    div[data-testid="stMetric"] label {
-        font-size: 0.8rem;
-        color: #555;
-        font-weight: 600;
-    }
-    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
-        font-size: 1.6rem;
+    .top-bar h1 {
+        font-size: 1.4rem;
+        margin: 0;
         font-weight: 700;
+    }
+    .top-bar .sub {
+        font-size: 0.85rem;
+        opacity: 0.9;
+        margin-top: 3px;
+    }
+    .live-dot {
+        display: inline-block;
+        width: 9px; height: 9px;
+        background: #2ecc71;
+        border-radius: 50%;
+        margin-right: 6px;
+        animation: pulse 1.6s infinite;
+        vertical-align: middle;
+    }
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.35; }
+    }
+
+    /* Summary strip */
+    .summary-strip {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+        margin-bottom: 14px;
+    }
+    .summary-card {
+        background: white;
+        border-radius: 10px;
+        padding: 10px 12px;
+        text-align: center;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+    }
+    .summary-card .label {
+        font-size: 0.7rem;
+        color: #888;
+        text-transform: uppercase;
+        font-weight: 600;
+        letter-spacing: 0.4px;
+    }
+    .summary-card .value {
+        font-size: 1.15rem;
+        font-weight: 700;
+        color: #003366;
+        margin-top: 2px;
+    }
+
+    /* Hall card */
+    .hall-card {
+        border-radius: 14px;
+        padding: 14px 16px;
+        margin-bottom: 10px;
+        box-shadow: 0 3px 8px rgba(0,0,0,0.07);
+        border-left: 5px solid;
+        position: relative;
+    }
+    .hall-card.smooth    { background: #E8F5E9; border-color: #16A085; }
+    .hall-card.busy      { background: #FFF8E1; border-color: #F39C12; }
+    .hall-card.congested { background: #FFEBEE; border-color: #E74C3C; }
+
+    .hall-card .name {
+        font-size: 1.05rem;
+        font-weight: 700;
+        color: #1a1a1a;
+        margin-bottom: 2px;
+    }
+    .hall-card .name-en {
+        font-size: 0.75rem;
+        color: #666;
+        margin-bottom: 6px;
+    }
+    .hall-card .status-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 6px;
+    }
+    .hall-card .status-badge {
+        font-size: 0.72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        padding: 3px 9px;
+        border-radius: 10px;
+        letter-spacing: 0.3px;
+    }
+    .hall-card.smooth .status-badge    { background: #16A085; color: white; }
+    .hall-card.busy .status-badge      { background: #F39C12; color: white; }
+    .hall-card.congested .status-badge { background: #E74C3C; color: white; }
+
+    .hall-card .reco-badge {
+        background: #FFD700;
+        color: #5d4037;
+        font-size: 0.7rem;
+        font-weight: 700;
+        padding: 3px 9px;
+        border-radius: 10px;
+    }
+    .hall-card .metrics {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-top: 6px;
+    }
+    .hall-card .metric {
+        font-size: 0.85rem;
+        color: #444;
+    }
+    .hall-card .metric strong {
+        font-size: 1rem;
+        color: #1a1a1a;
+    }
+    .hall-card .congestion-bar {
+        height: 6px;
+        background: rgba(0,0,0,0.08);
+        border-radius: 3px;
+        margin-top: 8px;
+        overflow: hidden;
+    }
+    .hall-card .congestion-fill {
+        height: 100%;
+        border-radius: 3px;
+    }
+    .hall-card.smooth .congestion-fill    { background: #16A085; }
+    .hall-card.busy .congestion-fill      { background: #F39C12; }
+    .hall-card.congested .congestion-fill { background: #E74C3C; }
+    .hall-card .cong-label {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.7rem;
+        color: #666;
+        margin-top: 3px;
     }
 
     /* Nudge banner */
     .nudge-banner {
         background: linear-gradient(135deg, #fff8e1, #fff3cd);
-        border-left: 4px solid #F39C12;
-        padding: 14px 20px;
-        border-radius: 8px;
-        font-size: 1.05rem;
+        border-left: 5px solid #F39C12;
+        padding: 14px 18px;
+        border-radius: 12px;
+        font-size: 0.95rem;
         color: #5d4037;
-        margin-top: 1rem;
+        margin-top: 14px;
+        box-shadow: 0 3px 8px rgba(243,156,18,0.18);
     }
+    .nudge-banner strong { color: #E65100; }
 
     /* Sidebar */
-    .sidebar-title {
-        font-size: 1.1rem;
-        font-weight: 700;
-        color: #003366;
-    }
-
-    /* Section headers */
-    .section-header {
-        font-size: 1.15rem;
-        font-weight: 700;
-        color: #003366;
-        margin-top: 1.5rem;
-        margin-bottom: 0.5rem;
-        border-bottom: 2px solid #003366;
-        padding-bottom: 4px;
+    section[data-testid="stSidebar"] {
+        background: #f7f8fa;
     }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================
-# Sidebar — Interactive Controls
+# Sidebar Controls
 # ============================================================
-st.sidebar.markdown('<p class="sidebar-title">Simulation Controls</p>', unsafe_allow_html=True)
+st.sidebar.markdown("### \u2699\ufe0f Simulation Controls")
 st.sidebar.markdown("---")
 
 lam_peak = st.sidebar.slider(
     "Peak Arrival Rate \u03bb\n(students / min)",
-    min_value=0.3, max_value=1.5, value=1.0, step=0.1,
-    help="Lunch-peak arrival rate. 1.0 = 60 students/hr (baseline)."
-)
-
-mean_a = st.sidebar.slider(
-    "Counter A Service Time\n(min / student)",
-    min_value=1.5, max_value=4.0, value=3.0, step=0.1,
-    help="Average time Window A takes per student. Higher = slower service."
+    min_value=0.3, max_value=1.8, value=1.0, step=0.1,
+    help="Total lunch-peak arrival rate across all halls.",
 )
 
 nudge = st.sidebar.checkbox(
     "Enable Smart Nudge",
     value=True,
-    help="When ON, 70% of students are guided to Window B (faster). When OFF, 50/50 split."
+    help="Highlight the fastest hall in real time.",
 )
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"""
-**Current Configuration**
+**Live Parameters**
 
 | Parameter | Value |
 |---|---|
 | \u03bb (total) | {lam_peak:.1f} /min |
-| Window A \u03bc | {mean_a:.1f} min |
-| Window B \u03bc | {SERVICE_MEAN_B:.1f} min |
-| Nudge | {'ON \u2705' if nudge else 'OFF \u274c'} |
-| Split (A:B) | {'30:70' if nudge else '50:50'} |
+| Halls tracked | 13 |
+| Smart Nudge | {'ON \u2705' if nudge else 'OFF \u274c'} |
+| Updated | {datetime.now().strftime('%H:%M:%S')} |
 """)
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("""
-*Model: M/G/1 queue per window*
-*Poisson arrivals, lognormal service*
-*90-min peak window (12:00-13:30)*
+with st.sidebar.expander("\U0001F4DA Model Details"):
+    st.markdown("""
+Each hall is modelled as an **M/G/1** queue. Real-time wait times are
+computed via the **Pollaczek-Khinchine** formula:
+
+$$E[W] = \\frac{\\lambda_i \\cdot E[S^2]}{2(1-\\rho_i)}, \\quad \\rho_i = \\lambda_i \\cdot \\mu_i$$
+
+where \u03bb_i = \u03bb \u00d7 (hall's peak share) and \u03bc_i is the
+hall-specific mean service time.
+
+**Hall shares** reflect typical lunchtime popularity (slower halls
+attract more arrivals).
 """)
+
+# Optional detailed simulation (collapsed by default)
+with st.sidebar.expander("\U0001F4CA Run Detailed Simulation"):
+    sim_hall_idx = st.selectbox(
+        "Hall to simulate",
+        options=range(len(DINING_HALLS)),
+        format_func=lambda i: f"{DINING_HALLS[i][0]} ({DINING_HALLS[i][1]})",
+    )
+    run_sim = st.button("\u25B6 Simulate", use_container_width=True)
 
 
 # ============================================================
 # Main Page
 # ============================================================
-st.markdown('<p class="main-title">\U0001F37D\uFE0F HKU Smart Dining: Live Queue Analytics & Nudge System</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-title">Real-time M/G/c queue simulation with behavioural-nudge decision support &mdash; Centennial Campus Dining Hall</p>', unsafe_allow_html=True)
+metrics = compute_all_metrics(lam_peak, nudge)
+halls = metrics["halls"]
+fastest_idx = metrics["fastest"]
+slowest_idx = metrics["slowest"]
+fastest = halls[0]  # already sorted ascending by wait
+slowest = halls[-1]
 
-# --- Compute metrics ---
-metrics = compute_metrics(lam_peak, mean_a, nudge)
+# --- Top bar (phone header style) ---
+st.markdown(f"""
+<div class="top-bar">
+    <h1>\U0001F37D\uFE0F HKU Smart Dining</h1>
+    <div class="sub">
+        <span class="live-dot"></span>
+        LIVE &nbsp;\u2022&nbsp; Live Queue Status &nbsp;\u2022&nbsp; Updated {datetime.now().strftime('%H:%M')}
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
-# --- Metric Cards ---
-st.markdown('<p class="section-header">Real-Time Metrics Dashboard</p>', unsafe_allow_html=True)
+# --- Summary strip ---
+fastest_name = fastest["cn"]
+slowest_name = slowest["cn"]
+fastest_wait = fastest["wait"]
+slowest_wait = slowest["wait"]
 
-col1, col2, col3 = st.columns(3)
+st.markdown(f"""
+<div class="summary-strip">
+    <div class="summary-card">
+        <div class="label">Fastest Hall</div>
+        <div class="value" style="color:#16A085;">{fastest_name}</div>
+        <div style="font-size:0.75rem;color:#666;margin-top:2px;">
+            \u2705 ~{fastest_wait:.1f} min wait
+        </div>
+    </div>
+    <div class="summary-card">
+        <div class="label">Avg Campus Wait</div>
+        <div class="value">{metrics["avg_wait"]:.1f} min</div>
+        <div style="font-size:0.75rem;color:#666;margin-top:2px;">all 13 halls</div>
+    </div>
+    <div class="summary-card">
+        <div class="label">Avoid</div>
+        <div class="value" style="color:#E74C3C;">{slowest_name}</div>
+        <div style="font-size:0.75rem;color:#666;margin-top:2px;">
+            \u26a0 ~{slowest_wait:.1f} min wait
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
-with col1:
-    wait_a_display = f"{metrics['wait_a']:.1f} min" if metrics['wait_a'] < 900 else "OVERLOADED"
-    delta_a = f"\u03bc_A = {mean_a:.1f} min" if metrics['wait_a'] < 900 else "\u26a0\ufe0f \u03c1 \u2265 1"
-    st.metric(
-        label="\U0001F534 Window A Wait Time",
-        value=wait_a_display,
-        delta=delta_a,
-    )
+# --- Section header ---
+st.markdown("### \U0001F4CD Live Hall Status  &nbsp;<span style='font-size:0.8rem;color:#888;font-weight:400;'>(sorted by current wait time)</span>", unsafe_allow_html=True)
 
-with col2:
-    wait_b_display = f"{metrics['wait_b']:.1f} min" if metrics['wait_b'] < 900 else "OVERLOADED"
-    delta_b = f"\u03bc_B = {SERVICE_MEAN_B:.1f} min" if metrics['wait_b'] < 900 else "\u26a0\ufe0f \u03c1 \u2265 1"
-    st.metric(
-        label="\U0001F7E2 Window B Wait Time",
-        value=wait_b_display,
-        delta=delta_b,
-    )
+# --- Render hall cards in 2-column grid ---
+def render_card(hall, is_recommended=False):
+    """Render a single hall card as HTML."""
+    s = STATUS[hall["status"]]
+    cn = hall["cn"]
+    en = hall["en"]
+    icon = hall["icon"]
+    q = hall["q_len"]
+    w = hall["wait"]
+    rho_pct = min(hall["rho"] * 100, 100)
+    reco_html = '<span class="reco-badge">\u2605 Recommended (Fastest)</span>' if is_recommended else ""
 
-with col3:
-    reduction = metrics["p95_reduction"]
-    if nudge:
-        p95_delta = f"P95: {metrics['p95_combined']:.1f} \u2193 from {metrics['p95_base']:.1f} min"
-    else:
-        p95_delta = f"P95: {metrics['p95_combined']:.1f} min (baseline)"
-    st.metric(
-        label="\U0001F4C8 P95 Wait Time Reduction",
-        value=f"-{reduction:.1f}%" if nudge else "0.0%",
-        delta=p95_delta,
-        delta_color="inverse" if nudge else "off",
-    )
+    wait_display = f"{w:.1f} min" if w < 900 else "Overloaded"
+    q_display = f"~{int(round(q))}" if q < 900 else ">100"
 
-st.markdown("---")
-
-# --- Simulation Run Button ---
-st.markdown('<p class="section-header">Queue Dynamics Simulation</p>', unsafe_allow_html=True)
-
-st.markdown("""
-Click the button below to run a real-time discrete-event simulation of the
-lunch peak (12:00 - 13:30). The chart shows per-minute **queue length** at
-each service window.
-""")
-
-if st.button("\u25B6 Run Real-Time Queue Simulation", type="primary", use_container_width=False):
-    with st.spinner("Running M/G/c discrete-event simulation (90 min peak)..."):
-        df, w_a, w_b, arr_a, arr_b = simulate_dynamics(lam_peak, mean_a, SERVICE_MEAN_B, nudge)
-
-    # --- Queue dynamics line chart ---
-    st.markdown("##### Queue Length Over Peak Hours")
-
-    fig, ax = plt.subplots(figsize=(12, 4.5))
-
-    # Shade peak zone
-    ax.axvspan(0, SIM_MINUTES, alpha=0.03, color="orange")
-
-    ax.plot(range(SIM_MINUTES), df["Window A (Queue Length)"],
-            color=C_RED, linewidth=2.2, label=f"Window A (\u03bc={mean_a:.1f} min)")
-    ax.plot(range(SIM_MINUTES), df["Window B (Queue Length)"],
-            color=C_GREEN, linewidth=2.2, label=f"Window B (\u03bc={SERVICE_MEAN_B:.1f} min)")
-
-    # Fill
-    ax.fill_between(range(SIM_MINUTES), df["Window A (Queue Length)"], alpha=0.1, color=C_RED)
-    ax.fill_between(range(SIM_MINUTES), df["Window B (Queue Length)"], alpha=0.1, color=C_GREEN)
-
-    # X-axis labels
-    tick_positions = [0, 15, 30, 45, 60, 75, 89]
-    tick_labels = ["12:00", "12:15", "12:30", "12:45", "13:00", "13:15", "13:30"]
-    ax.set_xticks(tick_positions)
-    ax.set_xticklabels(tick_labels)
-
-    ax.set_xlabel("Time", fontsize=11)
-    ax.set_ylabel("Queue Length (students)", fontsize=11)
-    title_suffix = "with Smart Nudge (30:70 split)" if nudge else "no nudge (50:50 split)"
-    ax.set_title(f"Queue Dynamics Over Lunch Peak \u2014 {title_suffix}",
-                 fontsize=13, fontweight="bold", color="#003366")
-    ax.legend(fontsize=10, loc="upper left")
-    ax.grid(alpha=0.25)
-    ax.set_xlim(-1, SIM_MINUTES)
-    ax.set_ylim(bottom=0)
-
-    plt.tight_layout()
-    st.pyplot(fig)
-    plt.close()
-
-    # --- Summary stats ---
-    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-    with col_s1:
-        st.metric("Students Served (A)", f"{len(w_a)}")
-    with col_s2:
-        st.metric("Students Served (B)", f"{len(w_b)}")
-    with col_s3:
-        avg_wait = np.mean(np.concatenate([w_a, w_b])) if len(w_a) + len(w_b) > 0 else 0
-        st.metric("Avg Wait (combined)", f"{avg_wait:.1f} min")
-    with col_s4:
-        max_wait = np.max(np.concatenate([w_a, w_b])) if len(w_a) + len(w_b) > 0 else 0
-        st.metric("Max Wait", f"{max_wait:.1f} min")
-
-    # --- Wait-time distribution ---
-    st.markdown("##### Wait-Time Distribution")
-    fig2, ax2 = plt.subplots(figsize=(12, 3.5))
-
-    all_w = np.concatenate([w_a, w_b]) if len(w_a) + len(w_b) > 0 else np.array([0])
-    bins = np.linspace(0, max(np.max(all_w), 10), 30)
-    ax2.hist(w_a, bins=bins, alpha=0.6, color=C_RED, label=f"Window A (mean={np.mean(w_a):.1f} min)" if len(w_a) > 0 else "Window A")
-    ax2.hist(w_b, bins=bins, alpha=0.6, color=C_GREEN, label=f"Window B (mean={np.mean(w_b):.1f} min)" if len(w_b) > 0 else "Window B")
-    ax2.set_xlabel("Wait Time (min)", fontsize=11)
-    ax2.set_ylabel("Number of Students", fontsize=11)
-    ax2.set_title("Distribution of Student Wait Times", fontsize=12, fontweight="bold", color="#003366")
-    ax2.legend(fontsize=10)
-    ax2.grid(axis="y", alpha=0.25)
-
-    plt.tight_layout()
-    st.pyplot(fig2)
-    plt.close()
-
-else:
-    st.info("\u23f1\ufe0f Click **\u25b6 Run Real-Time Queue Simulation** to generate the queue dynamics chart.")
+    return f"""
+    <div class="hall-card {hall['status']}">
+        <div class="status-row">
+            <div>
+                <div class="name">{icon} {cn}</div>
+                <div class="name-en">{en} &nbsp;\u2022&nbsp; \u03bc = {hall['mean_s']:.1f} min/student</div>
+            </div>
+            {reco_html if is_recommended else f'<span class="status-badge">{s["icon"]} {s["label"]}</span>'}
+        </div>
+        <div class="metrics">
+            <span class="metric">\U0001F465 <strong>{q_display}</strong> ppl in queue</span>
+            <span class="metric">\u23F1\uFE0F <strong>{wait_display}</strong> est. wait</span>
+        </div>
+        <div class="congestion-bar">
+            <div class="congestion-fill" style="width:{rho_pct:.0f}%;"></div>
+        </div>
+        <div class="cong-label">
+            <span>Congestion Level</span>
+            <span>{rho_pct:.0f}%</span>
+        </div>
+    </div>
+    """
 
 
-# --- Nudge Banner ---
-st.markdown("")
-if nudge and metrics["wait_a"] < 900 and metrics["wait_b"] < 900:
-    diff = abs(metrics["wait_a"] - metrics["wait_b"])
-    if diff > 0.5:
-        faster = "A" if metrics["wait_a"] < metrics["wait_b"] else "B"
-        slower = "B" if faster == "A" else "A"
+# Layout: 2 columns, fast halls on top
+# First render the recommended hall as a wide card
+recommended_html = render_card(fastest, is_recommended=True)
+st.markdown(recommended_html, unsafe_allow_html=True)
+
+st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
+
+# Remaining 12 halls in 2-column grid
+remaining = [h for h in halls if h["idx"] != fastest_idx]
+cols_per_row = 2
+for row_start in range(0, len(remaining), cols_per_row):
+    row = remaining[row_start:row_start + cols_per_row]
+    cols = st.columns(len(row), gap="small")
+    for col, hall in zip(cols, row):
+        with col:
+            st.markdown(render_card(hall, is_recommended=False), unsafe_allow_html=True)
+
+
+# --- Nudge banner at bottom ---
+if nudge:
+    if fastest_wait < 5:
         nudge_text = (
-            f"\U0001F4A1 <strong>Smart Nudge:</strong> Window {faster} is "
-            f"<strong>{diff:.0f} min faster</strong> than Window {slower}. "
-            f"Choosing Window {faster} optimises campus flow!"
+            f"\U0001F4A1 <strong>Smart Nudge:</strong> All halls are flowing smoothly "
+            f"({fastest_wait:.1f} min at {fastest_name}). No redirection needed."
         )
     else:
+        time_saved = slowest_wait - fastest_wait
         nudge_text = (
-            "\U0001F4A1 <strong>Smart Nudge:</strong> Both windows have similar wait times. "
-            "Flow is balanced \u2014 no redirection needed."
+            f"\U0001F4A1 <strong>Smart Nudge:</strong> Choosing <strong>{fastest_name}</strong> "
+            f"saves you ~<strong>{time_saved:.0f} minutes</strong> vs. <strong>{slowest_name}</strong>. "
+            f"Smart routing optimises campus flow \u2014 try the faster option!"
         )
 else:
     nudge_text = (
-        "\U0001F4A1 <strong>Smart Nudge:</strong> Enable the nudge toggle in the sidebar "
-        "to see real-time wait-time optimisation recommendations."
+        "\U0001F4A1 <strong>Smart Nudge:</strong> Enable the toggle in the sidebar to see "
+        "real-time routing recommendations."
     )
 
 st.markdown(f'<div class="nudge-banner">{nudge_text}</div>', unsafe_allow_html=True)
 
 
-# --- Model Info (expandable) ---
-with st.expander("\U0001F4DA Model Details & Methodology"):
-    st.markdown("""
-**Queue Model: M/G/1 per window**
-- **M** (Markovian/Poisson arrivals): inter-arrival times ~ Exponential(\u03bb)
-- **G** (General service): service times ~ Lognormal(\u03bc, \u03c3) \u2014 right-skewed, realistic
-- **1** server per window
+# --- Optional detailed simulation output ---
+if run_sim:
+    st.markdown("---")
+    st.markdown(f"### \U0001F4C8 Detailed Simulation: {DINING_HALLS[sim_hall_idx][0]}")
+    time_labels, q = simulate_dynamics(lam_peak, sim_hall_idx)
 
-**Pollaczek-Khinchine Formula** (real-time estimate):
+    fig, ax = plt.subplots(figsize=(11, 3.5))
+    cn, en, mean_s, share, _ = DINING_HALLS[sim_hall_idx]
+    ax.plot(range(len(q)), q, color="#3498DB", linewidth=2)
+    ax.fill_between(range(len(q)), q, alpha=0.15, color="#3498DB")
+    ax.set_title(
+        f"{cn} ({en}) \u2014 \u03bc={mean_s:.1f} min, \u03bb={lam_peak*share:.2f}/min, \u03c1={lam_peak*share*mean_s:.2f}",
+        fontsize=12, fontweight="bold", color="#003366",
+    )
+    ax.set_xlabel("Time (min from 12:00)")
+    ax.set_ylabel("Queue length (students)")
+    ax.set_xticks([0, 30, 60, 89])
+    ax.set_xticklabels(["12:00", "12:30", "13:00", "13:30"])
+    ax.grid(alpha=0.25)
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
 
-$$E[W] = \\frac{\\lambda \\cdot E[S^2]}{2(1 - \\rho)}, \\quad \\rho = \\lambda \\cdot E[S]$$
-
-**Smart Nudge Mechanism:**
-- **OFF**: students split 50/50 between windows (blind choice)
-- **ON**: the mini-program displays real-time queue lengths, guiding 70% of students
-  to the faster window \u2014 effectively reshaping \u03bb(t) from a sharp peak to a flattened plateau
-
-**Monte Carlo Validation:**
-- 300 replications per scenario for P95 estimation
-- 90-minute simulation window (12:00 \u2013 13:30 lunch peak)
-- Lognormal service: mean = window-specific, std = 0.5 min
-
-| Parameter | Symbol | Default | Adjustable |
-|---|---|---|---|
-| Peak arrival rate | \u03bb | 1.0 /min (60/hr) | \u2705 Sidebar |
-| Window A service mean | \u03bc_A | 3.0 min | \u2705 Sidebar |
-| Window B service mean | \u03bc_B | 2.5 min | fixed |
-| Service std | \u03c3 | 0.5 min | fixed |
-| Sim duration | T | 90 min | fixed |
-""")
 
 # --- Footer ---
 st.markdown("---")
-st.markdown("""
-<div style="text-align:center; color:#999; font-size:0.8rem;">
-HKU Smart Dining &mdash; Decision Analytics Mini-Project &nbsp;|&nbsp;
-M/G/c Queue Simulation + Behavioural Nudge &nbsp;|&nbsp;
-Built with Streamlit
-</div>
-""", unsafe_allow_html=True)
+st.markdown(
+    "<div style='text-align:center;color:#999;font-size:0.75rem;'>"
+    "HKU Smart Dining &mdash; Decision Analytics Mini-Project &nbsp;\u2022&nbsp; "
+    "M/G/1 Queue Simulation + Behavioural Nudge"
+    "</div>",
+    unsafe_allow_html=True,
+)
