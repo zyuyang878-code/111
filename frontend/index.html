@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>HKU Smart Dining</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+  background:linear-gradient(180deg,#f0f2f5 0%,#e8eaf0 100%);
+  min-height:100vh;
+  color:#1a1a1a;
+}
+.container{max-width:480px;margin:0 auto;padding:12px}
+
+/* Top bar */
+.top-bar{
+  background:linear-gradient(135deg,#003366,#1a4789);
+  color:#fff;border-radius:14px;padding:16px 20px;margin-bottom:14px;
+  box-shadow:0 4px 12px rgba(0,51,102,.18);
+}
+.top-bar h1{font-size:1.4rem;font-weight:700}
+.top-bar .sub{font-size:.85rem;opacity:.9;margin-top:3px}
+.top-bar .period-tag{
+  display:inline-block;background:rgba(255,255,255,.18);
+  padding:2px 10px;border-radius:10px;font-size:.75rem;font-weight:600;margin-left:6px;
+}
+.live-dot{
+  display:inline-block;width:9px;height:9px;background:#2ecc71;border-radius:50%;
+  margin-right:6px;animation:pulse 1.6s infinite;vertical-align:middle;
+}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* Summary strip */
+.summary-strip{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:14px}
+.summary-card{
+  background:#fff;border-radius:10px;padding:10px 12px;text-align:center;
+  box-shadow:0 2px 6px rgba(0,0,0,.06);
+}
+.summary-card .label{font-size:.7rem;color:#888;text-transform:uppercase;font-weight:600;letter-spacing:.4px}
+.summary-card .value{font-size:1.0rem;font-weight:700;color:#003366;margin-top:2px}
+.summary-card .detail{font-size:.7rem;color:#666;margin-top:2px}
+
+/* Location bar */
+.location-bar{
+  background:#fff;border-radius:10px;padding:10px 14px;margin-bottom:14px;
+  display:flex;align-items:center;justify-content:space-between;
+  box-shadow:0 2px 6px rgba(0,0,0,.06);font-size:.85rem;
+}
+.location-bar .loc-text{color:#003366;font-weight:600}
+.location-bar .loc-text.coord{color:#999;font-weight:400;font-size:.78rem}
+.btn-refresh{
+  background:#003366;color:#fff;border:none;border-radius:6px;
+  padding:6px 14px;font-size:.8rem;cursor:pointer;font-weight:600;
+}
+.btn-refresh:hover{background:#1a4789}
+
+/* Section header */
+.section-header{font-size:1.05rem;font-weight:700;color:#1a1a1a;margin-bottom:10px;display:flex;align-items:center;gap:6px}
+
+/* Canteen card */
+.canteen-card{
+  border-radius:14px;padding:14px 16px;margin-bottom:10px;
+  box-shadow:0 3px 8px rgba(0,0,0,.07);border-left:5px solid;
+  transition:transform .2s,box-shadow .2s;
+}
+.canteen-card:hover{transform:translateY(-2px);box-shadow:0 6px 16px rgba(0,0,0,.12)}
+.canteen-card.low{background:#E8F5E9;border-color:#16A085}
+.canteen-card.mid{background:#FFF8E1;border-color:#F39C12}
+.canteen-card.high{background:#FFEBEE;border-color:#E74C3C}
+
+.card-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px}
+.card-header .name{font-size:1.05rem;font-weight:700}
+.card-header .name-en{font-size:.72rem;color:#666;margin-top:2px}
+.card-header .rank-badge{
+  font-size:.7rem;font-weight:700;padding:3px 9px;border-radius:10px;
+  background:#003366;color:#fff;white-space:nowrap;
+}
+
+.card-info{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.info-pill{
+  font-size:.78rem;font-weight:600;padding:3px 10px;border-radius:12px;
+  display:inline-flex;align-items:center;gap:4px;
+}
+.pill-distance{background:#E3F2FD;color:#1565C0}
+.pill-queue-low{background:#16A085;color:#fff}
+.pill-queue-mid{background:#F39C12;color:#fff}
+.pill-queue-high{background:#E74C3C;color:#fff}
+
+.card-footer{display:flex;justify-content:space-between;align-items:center;font-size:.75rem;color:#666}
+.card-footer .score{font-weight:700;color:#003366}
+.calib-badge{
+  font-size:.65rem;font-weight:600;padding:2px 8px;border-radius:8px;
+  background:#FFD700;color:#5d4037;
+}
+
+/* Loading */
+.loading{text-align:center;padding:40px;color:#999}
+.spinner{
+  width:36px;height:36px;border:3px solid #e0e0e0;border-top-color:#003366;
+  border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 10px;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Error */
+.error-box{
+  background:#FFEBEE;border:1px solid #E74C3C;border-radius:10px;
+  padding:14px 16px;margin-bottom:14px;color:#C62828;font-size:.85rem;
+}
+.error-box .retry-btn{
+  margin-top:8px;background:#E74C3C;color:#fff;border:none;
+  border-radius:6px;padding:6px 16px;cursor:pointer;font-weight:600;
+}
+
+/* Nudge banner */
+.nudge-banner{
+  background:linear-gradient(135deg,#fff8e1,#fff3cd);border-left:5px solid #F39C12;
+  padding:14px 18px;border-radius:12px;font-size:.9rem;color:#5d4037;
+  margin-top:14px;box-shadow:0 3px 8px rgba(243,156,18,.18);
+}
+.nudge-banner strong{color:#E65100}
+
+/* Footer */
+.footer{text-align:center;color:#999;font-size:.72rem;margin-top:20px;padding:10px 0}
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Top bar -->
+  <div class="top-bar">
+    <h1>HKU Smart Dining</h1>
+    <div class="sub">
+      <span class="live-dot"></span>
+      LIVE &nbsp;|&nbsp; 智能综合排序 &nbsp;|&nbsp;
+      <span id="timeStr">--:--</span>
+      <span class="period-tag" id="periodTag">--</span>
+    </div>
+  </div>
+
+  <!-- Location bar -->
+  <div class="location-bar">
+    <div>
+      <div class="loc-text" id="locStatus">正在获取定位...</div>
+      <div class="loc-text coord" id="locCoord"></div>
+    </div>
+    <button class="btn-refresh" onclick="init()">刷新</button>
+  </div>
+
+  <!-- Summary strip -->
+  <div class="summary-strip" id="summaryStrip" style="display:none">
+    <div class="summary-card">
+      <div class="label">最近食堂</div>
+      <div class="value" id="nearestName">-</div>
+      <div class="detail" id="nearestDetail">-</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">最不挤</div>
+      <div class="value" id="smoothName">-</div>
+      <div class="detail" id="smoothDetail">-</div>
+    </div>
+  </div>
+
+  <!-- Error box -->
+  <div class="error-box" id="errorBox" style="display:none">
+    <div id="errorText"></div>
+    <button class="retry-btn" onclick="init()">重试</button>
+  </div>
+
+  <!-- Loading -->
+  <div class="loading" id="loadingBox">
+    <div class="spinner"></div>
+    <div>正在获取智能排序结果...</div>
+  </div>
+
+  <!-- Section header -->
+  <div class="section-header" id="sectionHeader" style="display:none">
+    <span>实时食堂状态</span>
+  </div>
+
+  <!-- Canteen list -->
+  <div id="canteenList"></div>
+
+  <!-- Nudge banner -->
+  <div class="nudge-banner" id="nudgeBanner" style="display:none"></div>
+
+  <div class="footer">
+    HKU Smart Dining &mdash; 智能综合排序 (距离 60% + 排队 40%)
+  </div>
+</div>
+
+<script>
+const API_BASE = 'http://localhost:8000';
+
+function init() {
+  document.getElementById('errorBox').style.display = 'none';
+  document.getElementById('loadingBox').style.display = 'block';
+  document.getElementById('canteenList').innerHTML = '';
+  document.getElementById('summaryStrip').style.display = 'none';
+  document.getElementById('sectionHeader').style.display = 'none';
+  document.getElementById('nudgeBanner').style.display = 'none';
+
+  // 1. 获取定位
+  if (!navigator.geolocation) {
+    showError('您的浏览器不支持定位功能');
+    return;
+  }
+
+  document.getElementById('locStatus').textContent = '正在获取定位...';
+  navigator.geolocation.getCurrentPosition(
+    (position) => {
+      const lat = position.coords.latitude;
+      const lng = position.coords.longitude;
+      document.getElementById('locStatus').textContent = '定位成功';
+      document.getElementById('locCoord').textContent =
+        `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      fetchSmartSort(lat, lng);
+    },
+    (err) => {
+      // 定位失败 — 用港大本部作为默认位置
+      const lat = 22.2835, lng = 114.1375;
+      document.getElementById('locStatus').textContent = '定位失败，使用默认位置 (港大本部)';
+      document.getElementById('locCoord').textContent =
+        `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      fetchSmartSort(lat, lng);
+    },
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+}
+
+async function fetchSmartSort(lat, lng) {
+  try {
+    const resp = await fetch(`${API_BASE}/api/canteens/smart-sort?lat=${lat}&lng=${lng}`);
+    if (!resp.ok) throw new Error(`API 返回 ${resp.status}`);
+    const json = await resp.json();
+    renderResults(json.data);
+  } catch (e) {
+    showError(`无法连接后端 API: ${e.message}<br>请确认后端已启动: <code>uvicorn main:app --port 8000</code>`);
+  }
+}
+
+function renderResults(canteens) {
+  document.getElementById('loadingBox').style.display = 'none';
+  document.getElementById('sectionHeader').style.display = 'block';
+  document.getElementById('summaryStrip').style.display = 'grid';
+
+  // 时间
+  const now = new Date();
+  document.getElementById('timeStr').textContent =
+    `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+
+  if (canteens.length === 0) {
+    document.getElementById('canteenList').innerHTML = '<div class="loading">暂无食堂数据</div>';
+    return;
+  }
+
+  // 时段标签
+  const periodLabel = canteens[0].period_label || '';
+  document.getElementById('periodTag').textContent = periodLabel;
+
+  // Summary: nearest & smoothest
+  const nearest = canteens[0]; // already sorted by composite score (distance-weighted)
+  const smoothest = [...canteens].sort((a,b) => a.queue_minutes - b.queue_minutes)[0];
+
+  document.getElementById('nearestName').textContent = `${nearest.icon} ${nearest.name}`;
+  document.getElementById('nearestDetail').textContent = nearest.distance_text;
+  document.getElementById('smoothName').textContent = `${smoothest.icon} ${smoothest.name}`;
+  document.getElementById('smoothDetail').textContent = `排队约${smoothest.queue_minutes}分钟`;
+
+  // Render cards
+  const list = document.getElementById('canteenList');
+  list.innerHTML = canteens.map((c, i) => {
+    const queueClass = c.queue_level === '低' ? 'low' : c.queue_level === '中' ? 'mid' : 'high';
+    const queuePillClass = c.queue_level === '低' ? 'pill-queue-low' : c.queue_level === '中' ? 'pill-queue-mid' : 'pill-queue-high';
+    const rankBadge = i === 0
+      ? '<span class="rank-badge" style="background:#FFD700;color:#5d4037">TOP 1 推荐</span>'
+      : `<span class="rank-badge">#${i+1}</span>`;
+    const calibBadge = c.calibration_delta !== 0
+      ? `<span class="calib-badge">人工校准 ${c.calibration_delta>0?'+':''}${c.calibration_delta}</span>`
+      : '';
+
+    return `
+    <div class="canteen-card ${queueClass}">
+      <div class="card-header">
+        <div>
+          <div class="name">${c.icon} ${c.name}</div>
+          <div class="name-en">${c.name_en}</div>
+        </div>
+        ${rankBadge}
+      </div>
+      <div class="card-info">
+        <span class="info-pill pill-distance">${c.distance_text}</span>
+        <span class="info-pill ${queuePillClass}">排队指数: ${c.queue_level}</span>
+        <span class="info-pill" style="background:#F3E5F5;color:#7B1FA2">${c.queue_text}</span>
+      </div>
+      <div class="card-footer">
+        <span>综合分: <span class="score">${c.composite_score.toFixed(1)}</span> / 100</span>
+        ${calibBadge}
+      </div>
+    </div>`;
+  }).join('');
+
+  // Nudge banner
+  const banner = document.getElementById('nudgeBanner');
+  banner.innerHTML = `
+    <strong>Smart Nudge:</strong> 综合推荐 <strong>${canteens[0].name}</strong>
+    &mdash; ${canteens[0].distance_text}，预估排队约 ${canteens[0].queue_minutes} 分钟。
+    跟着推荐走，省时又省力!
+  `;
+  banner.style.display = 'block';
+}
+
+function showError(msg) {
+  document.getElementById('loadingBox').style.display = 'none';
+  document.getElementById('errorBox').style.display = 'block';
+  document.getElementById('errorText').innerHTML = msg;
+}
+
+// Auto init on page load
+init();
+</script>
+</body>
+</html>

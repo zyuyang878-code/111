@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Runtime data
+backend/calibrations.json
+
+# OS
+.DS_Store
+Thumbs.db

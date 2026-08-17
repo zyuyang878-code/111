@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HKU Smart Dining - 管理后台</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+  background:#f5f5f5;min-height:100vh;color:#1a1a1a;
+}
+.container{max-width:600px;margin:0 auto;padding:12px}
+
+/* Top bar */
+.top-bar{
+  background:linear-gradient(135deg,#003366,#1a4789);color:#fff;
+  border-radius:14px;padding:16px 20px;margin-bottom:14px;
+  box-shadow:0 4px 12px rgba(0,51,102,.18);
+}
+.top-bar h1{font-size:1.3rem;font-weight:700}
+.top-bar .sub{font-size:.82rem;opacity:.85;margin-top:3px}
+
+/* Info banner */
+.info-banner{
+  background:#E3F2FD;border:1px solid #90CAF9;border-radius:10px;
+  padding:12px 16px;margin-bottom:14px;font-size:.82rem;color:#1565C0;
+}
+.info-banner strong{color:#003366}
+
+/* Calibration cards */
+.calib-card{
+  background:#fff;border-radius:12px;padding:14px 16px;margin-bottom:8px;
+  box-shadow:0 2px 6px rgba(0,0,0,.06);display:flex;align-items:center;
+  justify-content:space-between;border-left:4px solid transparent;
+  transition:border-color .3s;
+}
+.calib-card.calibrated{border-left-color:#FFD700}
+.calib-card.calibrated-up{border-left-color:#E74C3C}
+.calib-card.calibrated-down{border-left-color:#16A085}
+
+.card-left{flex:1}
+.card-name{font-size:1rem;font-weight:700}
+.card-name-en{font-size:.72rem;color:#999;margin-top:1px}
+.card-meta{font-size:.75rem;color:#666;margin-top:4px}
+.hot-stars{color:#FF9800;letter-spacing:1px}
+
+.calib-status{font-size:.7rem;font-weight:600;padding:2px 8px;border-radius:8px;margin-left:8px}
+.status-none{background:#E0E0E0;color:#666}
+.status-up{background:#FFEBEE;color:#C62828}
+.status-down{background:#E8F5E9;color:#2E7D32}
+
+.card-actions{display:flex;gap:6px;align-items:center}
+.btn{
+  border:none;border-radius:8px;padding:8px 16px;font-size:.85rem;
+  font-weight:700;cursor:pointer;transition:all .2s;
+}
+.btn-up{background:#FFEBEE;color:#C62828;border:1px solid #FFCDD2}
+.btn-up:hover{background:#E74C3C;color:#fff}
+.btn-up.active{background:#E74C3C;color:#fff}
+.btn-down{background:#E8F5E9;color:#2E7D32;border:1px solid #C8E6C9}
+.btn-down:hover{background:#16A085;color:#fff}
+.btn-down.active{background:#16A085;color:#fff}
+.btn-clear{background:#E0E0E0;color:#666;border:1px solid #BDBDBD}
+.btn-clear:hover{background:#757575;color:#fff}
+
+/* Toast */
+.toast{
+  position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+  background:#003366;color:#fff;padding:10px 24px;border-radius:24px;
+  font-size:.85rem;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.2);
+  opacity:0;transition:opacity .3s;pointer-events:none;z-index:999;
+}
+.toast.show{opacity:1}
+
+/* Loading */
+.loading{text-align:center;padding:40px;color:#999}
+.spinner{
+  width:36px;height:36px;border:3px solid #e0e0e0;border-top-color:#003366;
+  border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 10px;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Section header */
+.section-header{font-size:.95rem;font-weight:700;color:#003366;margin-bottom:10px;margin-top:14px}
+
+/* Legend */
+.legend{display:flex;gap:12px;font-size:.72rem;color:#666;margin-bottom:10px}
+.legend-item{display:flex;align-items:center;gap:4px}
+.legend-dot{width:10px;height:10px;border-radius:3px}
+</style>
+</head>
+<body>
+<div class="container">
+  <!-- Top bar -->
+  <div class="top-bar">
+    <h1>管理后台 - 人工校准</h1>
+    <div class="sub">运营人员 / 食堂经理 - 手动调整人流系数</div>
+  </div>
+
+  <!-- Info banner -->
+  <div class="info-banner">
+    <strong>使用说明:</strong> 点击「+1」表示当前比预期更挤 (如临时活动/雨天集中)，
+    点击「-1」表示当前比预期空 (如食堂部分关闭)。
+    校准会叠加到 <code>base_hot_level</code> 上再乘以时间段系数，
+    <strong>立即生效</strong>于用户端排序。
+  </div>
+
+  <!-- Legend -->
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:#FFD700"></div>已校准</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#E74C3C"></div>+1 人流偏多</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#16A085"></div>-1 人流偏少</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#E0E0E0"></div>无校准</div>
+  </div>
+
+  <!-- Loading -->
+  <div class="loading" id="loadingBox">
+    <div class="spinner"></div>
+    <div>正在加载食堂数据...</div>
+  </div>
+
+  <!-- Canteen list -->
+  <div id="canteenList"></div>
+
+  <!-- Footer -->
+  <div style="text-align:center;color:#999;font-size:.72rem;margin-top:20px;padding:10px 0">
+    HKU Smart Dining Admin - 人工校准管理
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+const API_BASE = 'http://localhost:8000';
+let canteensData = [];
+let calibrationsData = {};
+
+async function init() {
+  document.getElementById('loadingBox').style.display = 'block';
+  document.getElementById('canteenList').innerHTML = '';
+
+  try {
+    // 并行获取食堂数据和校准数据
+    const [canteensResp, calibResp] = await Promise.all([
+      fetch(`${API_BASE}/api/canteens`).then(r => r.json()),
+      fetch(`${API_BASE}/api/admin/calibrations`).then(r => r.json())
+    ]);
+
+    canteensData = canteensResp.data;
+    calibrationsData = {};
+    calibResp.data.forEach(c => { calibrationsData[c.canteen_name] = c.delta; });
+
+    renderCanteens();
+  } catch (e) {
+    document.getElementById('loadingBox').innerHTML =
+      `<div style="color:#C62828">无法连接后端 API: ${e.message}<br>请确认后端已启动</div>`;
+  }
+}
+
+function renderCanteens() {
+  document.getElementById('loadingBox').style.display = 'none';
+
+  const list = document.getElementById('canteenList');
+  list.innerHTML = canteensData.map(c => {
+    const delta = calibrationsData[c.name] || 0;
+    const cardClass = delta > 0 ? 'calibrated-up' : delta < 0 ? 'calibrated-down' : '';
+    const statusBadge = delta > 0
+      ? '<span class="calib-status status-up">+1 已校准</span>'
+      : delta < 0
+      ? '<span class="calib-status status-down">-1 已校准</span>'
+      : '<span class="calib-status status-none">未校准</span>';
+
+    // 热度星级
+    const stars = '\u2605'.repeat(c.base_hot_level) + '\u2606'.repeat(5 - c.base_hot_level);
+    const effectiveLevel = c.base_hot_level + delta;
+
+    return `
+    <div class="calib-card ${cardClass}">
+      <div class="card-left">
+        <div class="card-name">${c.icon} ${c.name} ${statusBadge}</div>
+        <div class="card-name-en">${c.name_en} | ${c.campus_zone}</div>
+        <div class="card-meta">
+          基础热度: <span class="hot-stars">${stars}</span> (${c.base_hot_level}/5)
+          ${delta !== 0 ? `&rarr; 校准后: <strong>${effectiveLevel}</strong>` : ''}
+        </div>
+      </div>
+      <div class="card-actions">
+        <button class="btn btn-up ${delta>0?'active':''}" onclick="setCalib('${c.name}', 1)">+1</button>
+        <button class="btn btn-down ${delta<0?'active':''}" onclick="setCalib('${c.name}', -1)">-1</button>
+        ${delta !== 0 ? `<button class="btn btn-clear" onclick="setCalib('${c.name}', 0)">清除</button>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function setCalib(name, delta) {
+  try {
+    const resp = await fetch(`${API_BASE}/api/admin/calibrate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ canteen_name: name, delta: delta })
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+
+    const json = await resp.json();
+    showToast(json.data.message);
+
+    // 更新本地状态
+    if (delta === 0) {
+      delete calibrationsData[name];
+    } else {
+      calibrationsData[name] = delta;
+    }
+    renderCanteens();
+  } catch (e) {
+    showToast(`操作失败: ${e.message}`);
+  }
+}
+
+function showToast(msg) {
+  const toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 2500);
+}
+
+// Auto init
+init();
+</script>
+</body>
+</html>
